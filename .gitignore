@@ -1,0 +1,7 @@
+# Local secrets/config
+.env
+credentials.yml
+theme.yml
+.DS_Store
+archive/
+get_cookies.py

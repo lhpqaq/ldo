@@ -1,0 +1,605 @@
+package cli
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
+
+	"github.com/lhpqaq/ldo/internal/client"
+)
+
+type CLI struct {
+	client       *client.Client
+	currentTopic *client.TopicDetail
+	posts        []client.Post
+	allPostIDs   []int
+	currentIdx   int
+	topics       []client.Topic
+	users        map[int]string
+	filter       string
+	moreURL      string
+	reader       *bufio.Reader
+}
+
+func NewCLI(c *client.Client) *CLI {
+	return &CLI{
+		client: c,
+		filter: "latest",
+		users:  make(map[int]string),
+		reader: bufio.NewReader(os.Stdin),
+	}
+}
+
+func (c *CLI) Run() {
+	fmt.Println("Linux.do Terminal - CLI Mode")
+	fmt.Println("Type 'help' for available commands")
+	fmt.Println()
+
+	// Load initial topics
+	c.loadTopics()
+
+	for {
+		fmt.Print("linuxdo> ")
+		input, _ := c.reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+
+		if input == "" {
+			continue
+		}
+
+		parts := strings.Fields(input)
+		cmd := parts[0]
+		args := parts[1:]
+
+		switch cmd {
+		case "ls", "list":
+			c.cmdList(args)
+		case "open":
+			c.cmdOpen(args)
+		case "cd":
+			c.cmdCD(args)
+		case "pwd":
+			c.cmdPwd()
+		case "cat", "view":
+			c.cmdView(args)
+		case "more":
+			c.cmdMore()
+		case "reply":
+			c.cmdReply()
+		case "like":
+			c.cmdLike(args)
+		case "jump":
+			c.cmdJump(args)
+		case "last":
+			c.cmdLast()
+		case "browser":
+			c.cmdBrowser()
+		case "filter":
+			c.cmdFilter(args)
+		case "refresh":
+			c.cmdRefresh()
+		case "clear":
+			fmt.Print("\033[H\033[2J")
+		case "help", "?":
+			c.cmdHelp()
+		case "exit", "quit", "q":
+			fmt.Println("Goodbye!")
+			return
+		default:
+			fmt.Printf("Unknown command: %s\n", cmd)
+			fmt.Println("Type 'help' for available commands")
+		}
+	}
+}
+
+func (c *CLI) loadTopics() {
+	var topics *client.TopicList
+	var err error
+
+	switch c.filter {
+	case "hot":
+		topics, err = c.client.GetHotTopics()
+	case "new":
+		topics, err = c.client.GetNewTopics()
+	case "top":
+		topics, err = c.client.GetTopTopics("weekly")
+	default:
+		topics, err = c.client.GetLatestTopics()
+	}
+
+	if err != nil {
+		fmt.Printf("Error loading topics: %v\n", err)
+		return
+	}
+
+	c.topics = topics.TopicList.Topics
+	c.moreURL = topics.TopicList.MoreTopicsURL
+	for _, u := range topics.Users {
+		c.users[u.ID] = u.Username
+	}
+}
+
+func (c *CLI) cmdList(args []string) {
+	if len(c.topics) == 0 {
+		fmt.Println("No topics loaded")
+		return
+	}
+
+	limit := 20
+	if len(args) > 0 {
+		if n, err := strconv.Atoi(args[0]); err == nil && n > 0 {
+			limit = n
+		}
+	}
+
+	fmt.Printf("Topics (%s):\n", c.filter)
+	fmt.Println(strings.Repeat("-", 80))
+
+	for i, topic := range c.topics {
+		if i >= limit {
+			break
+		}
+		title := topic.Title
+		if len(title) > 50 {
+			title = title[:47] + "..."
+		}
+		fmt.Printf("%3d. %-50s  Replies: %4d  Views: %6d\n",
+			i+1, title, topic.ReplyCount, topic.Views)
+	}
+
+	fmt.Println(strings.Repeat("-", 80))
+	fmt.Printf("Total: %d topics loaded", len(c.topics))
+	if c.moreURL != "" {
+		fmt.Printf(" (use 'more' to load more)")
+	}
+	fmt.Println()
+}
+
+func (c *CLI) cmdOpen(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: open <topic_number>")
+		return
+	}
+
+	idx, err := strconv.Atoi(args[0])
+	if err != nil || idx < 1 || idx > len(c.topics) {
+		fmt.Printf("Invalid topic number: %s\n", args[0])
+		return
+	}
+
+	topicID := c.topics[idx-1].ID
+	detail, err := c.client.GetTopic(topicID)
+	if err != nil {
+		fmt.Printf("Error loading topic: %v\n", err)
+		return
+	}
+
+	c.currentTopic = detail
+	c.posts = detail.PostStream.Posts
+	c.allPostIDs = detail.PostStream.Stream
+	c.currentIdx = 0
+
+	fmt.Printf("Opened: %s\n", detail.Title)
+	fmt.Printf("Total posts: %d\n", detail.PostsCount)
+}
+
+func (c *CLI) cmdCD(args []string) {
+	if len(args) == 0 {
+		c.currentTopic = nil
+		c.posts = nil
+		c.allPostIDs = nil
+		fmt.Println("Back to topic list")
+		return
+	}
+
+	if args[0] == ".." {
+		c.currentTopic = nil
+		c.posts = nil
+		c.allPostIDs = nil
+		fmt.Println("Back to topic list")
+		return
+	}
+
+	c.cmdOpen(args)
+}
+
+func (c *CLI) cmdPwd() {
+	if c.currentTopic == nil {
+		fmt.Println("/topics")
+	} else {
+		fmt.Printf("/topics/%d - %s\n", c.currentTopic.ID, c.currentTopic.Title)
+	}
+}
+
+func (c *CLI) cmdView(args []string) {
+	if c.currentTopic == nil {
+		fmt.Println("No topic opened. Use 'open <number>' first")
+		return
+	}
+
+	if len(args) == 0 {
+		// View first post
+		if len(c.posts) > 0 {
+			c.displayPost(c.posts[0])
+		}
+		return
+	}
+
+	floor, err := strconv.Atoi(args[0])
+	if err != nil {
+		fmt.Printf("Invalid floor number: %s\n", args[0])
+		return
+	}
+
+	// Check if already loaded
+	for _, post := range c.posts {
+		if post.PostNumber == floor {
+			c.displayPost(post)
+			return
+		}
+	}
+
+	// Need to load
+	if floor < 1 || floor > c.currentTopic.PostsCount {
+		fmt.Printf("Invalid floor number: %d\n", floor)
+		return
+	}
+
+	start := floor - 1
+	if start < 0 {
+		start = 0
+	}
+	end := start + 1
+	if end > len(c.allPostIDs) {
+		end = len(c.allPostIDs)
+	}
+
+	postIDs := c.allPostIDs[start:end]
+	posts, err := c.client.GetPostsByIDs(c.currentTopic.ID, postIDs)
+	if err != nil {
+		fmt.Printf("Error loading post: %v\n", err)
+		return
+	}
+
+	if len(posts) > 0 {
+		c.displayPost(posts[0])
+	}
+}
+
+func (c *CLI) displayPost(post client.Post) {
+	fmt.Println(strings.Repeat("=", 80))
+	fmt.Printf("Floor #%d | Author: @%s | Time: %s\n", post.PostNumber, post.Username, post.CreatedAt)
+	fmt.Println(strings.Repeat("-", 80))
+
+	content := htmlToText(post.Cooked)
+	fmt.Println(content)
+
+	fmt.Println(strings.Repeat("=", 80))
+
+	// Check if liked
+	for _, action := range post.ActionsSummary {
+		if action.ID == 2 && action.Acted {
+			fmt.Println("Status: Liked")
+		}
+	}
+}
+
+func (c *CLI) cmdMore() {
+	if c.currentTopic == nil {
+		// Load more topics
+		if c.moreURL == "" {
+			fmt.Println("No more topics to load")
+			return
+		}
+
+		topics, err := c.client.GetMoreTopics(c.moreURL)
+		if err != nil {
+			fmt.Printf("Error loading more topics: %v\n", err)
+			return
+		}
+
+		c.topics = append(c.topics, topics.TopicList.Topics...)
+		c.moreURL = topics.TopicList.MoreTopicsURL
+		for _, u := range topics.Users {
+			c.users[u.ID] = u.Username
+		}
+
+		fmt.Printf("Loaded %d more topics. Total: %d\n", len(topics.TopicList.Topics), len(c.topics))
+	} else {
+		// Load more posts
+		currentLen := len(c.posts)
+		if currentLen >= len(c.allPostIDs) {
+			fmt.Println("All posts loaded")
+			return
+		}
+
+		batchSize := 20
+		end := currentLen + batchSize
+		if end > len(c.allPostIDs) {
+			end = len(c.allPostIDs)
+		}
+
+		postIDs := c.allPostIDs[currentLen:end]
+		posts, err := c.client.GetPostsByIDs(c.currentTopic.ID, postIDs)
+		if err != nil {
+			fmt.Printf("Error loading posts: %v\n", err)
+			return
+		}
+
+		c.posts = append(c.posts, posts...)
+		fmt.Printf("Loaded %d more posts. Total: %d/%d\n", len(posts), len(c.posts), c.currentTopic.PostsCount)
+	}
+}
+
+func (c *CLI) cmdReply() {
+	if c.currentTopic == nil {
+		fmt.Println("No topic opened")
+		return
+	}
+
+	fmt.Println("Enter your reply (type 'END' on a new line to finish, 'CANCEL' to cancel):")
+	var lines []string
+	for {
+		line, _ := c.reader.ReadString('\n')
+		line = strings.TrimRight(line, "\n")
+		if line == "END" {
+			break
+		}
+		if line == "CANCEL" {
+			fmt.Println("Reply cancelled")
+			return
+		}
+		lines = append(lines, line)
+	}
+
+	content := strings.Join(lines, "\n")
+	content = strings.TrimSpace(content)
+
+	if content == "" {
+		fmt.Println("Empty reply, cancelled")
+		return
+	}
+
+	err := c.client.CreatePost(c.currentTopic.ID, content, 0)
+	if err != nil {
+		fmt.Printf("Error posting reply: %v\n", err)
+		return
+	}
+
+	fmt.Println("Reply posted successfully!")
+}
+
+func (c *CLI) cmdLike(args []string) {
+	if c.currentTopic == nil {
+		fmt.Println("No topic opened")
+		return
+	}
+
+	if len(args) == 0 {
+		fmt.Println("Usage: like <floor_number>")
+		return
+	}
+
+	floor, err := strconv.Atoi(args[0])
+	if err != nil {
+		fmt.Printf("Invalid floor number: %s\n", args[0])
+		return
+	}
+
+	// Find the post
+	var targetPost *client.Post
+	for _, post := range c.posts {
+		if post.PostNumber == floor {
+			targetPost = &post
+			break
+		}
+	}
+
+	if targetPost == nil {
+		fmt.Printf("Floor %d not loaded yet\n", floor)
+		return
+	}
+
+	// Check if already liked
+	isLiked := false
+	for _, action := range targetPost.ActionsSummary {
+		if action.ID == 2 && action.Acted {
+			isLiked = true
+			break
+		}
+	}
+
+	if isLiked {
+		err = c.client.UnlikePost(targetPost.ID)
+		if err != nil {
+			fmt.Printf("Error unliking post: %v\n", err)
+			return
+		}
+		fmt.Println("Post unliked")
+	} else {
+		err = c.client.LikePost(targetPost.ID)
+		if err != nil {
+			fmt.Printf("Error liking post: %v\n", err)
+			return
+		}
+		fmt.Println("Post liked!")
+	}
+}
+
+func (c *CLI) cmdJump(args []string) {
+	if c.currentTopic == nil {
+		fmt.Println("No topic opened")
+		return
+	}
+
+	if len(args) == 0 {
+		fmt.Println("Usage: jump <floor_number>")
+		return
+	}
+
+	c.cmdView(args)
+}
+
+func (c *CLI) cmdLast() {
+	if c.currentTopic == nil {
+		fmt.Println("No topic opened")
+		return
+	}
+
+	floor := c.currentTopic.PostsCount
+	c.cmdView([]string{strconv.Itoa(floor)})
+}
+
+func (c *CLI) cmdBrowser() {
+	if c.currentTopic == nil {
+		fmt.Println("No topic opened")
+		return
+	}
+
+	url := fmt.Sprintf("https://linux.do/t/%d", c.currentTopic.ID)
+	fmt.Printf("Opening in browser: %s\n", url)
+
+	// Try to open in browser (simple approach)
+	fmt.Println("(Browser opening not implemented in CLI mode)")
+}
+
+func (c *CLI) cmdFilter(args []string) {
+	if len(args) == 0 {
+		fmt.Printf("Current filter: %s\n", c.filter)
+		fmt.Println("Available filters: latest, hot, new, top")
+		return
+	}
+
+	filter := args[0]
+	validFilters := []string{"latest", "hot", "new", "top"}
+	valid := false
+	for _, f := range validFilters {
+		if f == filter {
+			valid = true
+			break
+		}
+	}
+
+	if !valid {
+		fmt.Printf("Invalid filter: %s\n", filter)
+		fmt.Println("Available filters: latest, hot, new, top")
+		return
+	}
+
+	c.filter = filter
+	c.topics = nil
+	c.moreURL = ""
+	c.loadTopics()
+	fmt.Printf("Switched to %s filter\n", c.filter)
+}
+
+func (c *CLI) cmdRefresh() {
+	if c.currentTopic != nil {
+		// Refresh current topic
+		detail, err := c.client.GetTopic(c.currentTopic.ID)
+		if err != nil {
+			fmt.Printf("Error refreshing topic: %v\n", err)
+			return
+		}
+		c.currentTopic = detail
+		c.posts = detail.PostStream.Posts
+		c.allPostIDs = detail.PostStream.Stream
+		fmt.Println("Topic refreshed")
+	} else {
+		// Refresh topic list
+		c.topics = nil
+		c.moreURL = ""
+		c.loadTopics()
+		fmt.Println("Topic list refreshed")
+	}
+}
+
+func (c *CLI) cmdHelp() {
+	help := `
+Available Commands:
+
+Navigation:
+  ls [n]          - List topics (optionally show first n topics)
+  open <n>        - Open topic by number
+  cd <n>          - Change to topic (same as open)
+  cd .. / cd      - Go back to topic list
+  pwd             - Show current location
+
+Reading:
+  cat [floor]     - View post (default: first post)
+  view [floor]    - View post by floor number
+  more            - Load more topics/posts
+  jump <floor>    - Jump to specific floor
+  last            - Jump to last post
+
+Interaction:
+  reply           - Reply to current topic
+  like <floor>    - Like/unlike a post
+  browser         - Open current topic in browser
+
+Management:
+  filter [name]   - Change/show filter (latest, hot, new, top)
+  refresh         - Refresh current view
+  clear           - Clear screen
+  help / ?        - Show this help
+  exit / quit / q - Exit
+
+Examples:
+  ls 50           - List first 50 topics
+  open 3          - Open topic #3
+  cat 10          - View floor #10
+  like 5          - Like floor #5
+  filter hot      - Switch to hot topics
+`
+	fmt.Println(help)
+}
+
+func htmlToText(html string) string {
+	html = strings.ReplaceAll(html, "</p>", "\n\n")
+	html = strings.ReplaceAll(html, "<br>", "\n")
+	html = strings.ReplaceAll(html, "<br/>", "\n")
+	html = strings.ReplaceAll(html, "<br />", "\n")
+	html = strings.ReplaceAll(html, "</div>", "\n")
+	html = strings.ReplaceAll(html, "</li>", "\n")
+
+	html = strings.ReplaceAll(html, "<pre>", "\n```\n")
+	html = strings.ReplaceAll(html, "</pre>", "\n```\n")
+	html = strings.ReplaceAll(html, "<code>", "`")
+	html = strings.ReplaceAll(html, "</code>", "`")
+
+	html = strings.ReplaceAll(html, "<li>", "• ")
+
+	html = strings.ReplaceAll(html, "<blockquote>", "\n> ")
+	html = strings.ReplaceAll(html, "</blockquote>", "\n")
+
+	re := regexp.MustCompile(`<[^>]*>`)
+	text := re.ReplaceAllString(html, "")
+
+	text = strings.ReplaceAll(text, "&nbsp;", " ")
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&quot;", "\"")
+	text = strings.ReplaceAll(text, "&#39;", "'")
+
+	lines := strings.Split(text, "\n")
+	var cleaned []string
+	prevEmpty := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			if !prevEmpty {
+				cleaned = append(cleaned, "")
+			}
+			prevEmpty = true
+		} else {
+			cleaned = append(cleaned, line)
+			prevEmpty = false
+		}
+	}
+
+	return strings.TrimSpace(strings.Join(cleaned, "\n"))
+}
