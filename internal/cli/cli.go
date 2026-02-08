@@ -89,6 +89,8 @@ func (c *CLI) Run() {
 			c.cmdSearch(args)
 		case "clear":
 			fmt.Print("\033[H\033[2J")
+		case "bookmarks", "bm":
+			c.cmdBookmarks(args)
 		case "help", "?":
 			c.cmdHelp()
 		case "exit", "quit", "q":
@@ -664,6 +666,12 @@ Management:
   filter [name]   - Change/show filter (latest, hot, new, top)
   refresh         - Refresh current view
   clear           - Clear screen
+
+Bookmarks:
+  bookmarks / bm  - List all bookmarks
+  bm export [fmt] - Export bookmarks (txt, html, md) to ~/下載/
+  bm clear        - Delete all bookmarks (with confirmation)
+
   help / ?        - Show this help
   exit / quit / q - Exit
 
@@ -723,4 +731,202 @@ func htmlToText(html string) string {
 	}
 
 	return strings.TrimSpace(strings.Join(cleaned, "\n"))
+}
+
+// cmdBookmarks 書籤管理命令
+func (c *CLI) cmdBookmarks(args []string) {
+	if len(args) == 0 {
+		c.listBookmarks()
+		return
+	}
+
+	switch args[0] {
+	case "export":
+		format := "md"
+		if len(args) > 1 {
+			format = strings.ToLower(args[1])
+		}
+		c.exportBookmarks(format)
+	case "clear":
+		c.clearBookmarks()
+	default:
+		fmt.Printf("Unknown bookmarks subcommand: %s\n", args[0])
+		fmt.Println("Usage: bookmarks [export <txt|html|md> | clear]")
+	}
+}
+
+func (c *CLI) listBookmarks() {
+	fmt.Println("Fetching bookmarks...")
+	bookmarks, err := c.client.GetAllBookmarks()
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	if len(bookmarks) == 0 {
+		fmt.Println("No bookmarks found.")
+		return
+	}
+
+	fmt.Printf("\nFound %d bookmarks:\n\n", len(bookmarks))
+	for i, bm := range bookmarks {
+		title := bm.Title
+		if len(title) > 60 {
+			title = title[:57] + "..."
+		}
+		fmt.Printf("%3d. %s\n", i+1, title)
+		fmt.Printf("     %s\n", bm.CreatedAt[:10])
+	}
+	fmt.Println()
+}
+
+func (c *CLI) exportBookmarks(format string) {
+	if format != "txt" && format != "html" && format != "md" {
+		fmt.Printf("Invalid format: %s\n", format)
+		fmt.Println("Supported formats: txt, html, md")
+		return
+	}
+
+	fmt.Println("Fetching bookmarks...")
+	bookmarks, err := c.client.GetAllBookmarks()
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	if len(bookmarks) == 0 {
+		fmt.Println("No bookmarks to export.")
+		return
+	}
+
+	outputDir := "/home/joe/下載"
+	filename := fmt.Sprintf("bookmarks.%s", format)
+	filepath := fmt.Sprintf("%s/%s", outputDir, filename)
+
+	var content string
+	switch format {
+	case "txt":
+		content = c.formatBookmarksTXT(bookmarks)
+	case "html":
+		content = c.formatBookmarksHTML(bookmarks)
+	case "md":
+		content = c.formatBookmarksMD(bookmarks)
+	}
+
+	if err := os.WriteFile(filepath, []byte(content), 0644); err != nil {
+		fmt.Printf("Error writing file: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Exported %d bookmarks to: %s\n", len(bookmarks), filepath)
+}
+
+func (c *CLI) formatBookmarksTXT(bookmarks []client.Bookmark) string {
+	var sb strings.Builder
+	sb.WriteString("Linux.do Bookmarks\n")
+	sb.WriteString("==================\n\n")
+
+	for i, bm := range bookmarks {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, bm.Title))
+		sb.WriteString(fmt.Sprintf("   URL: https://linux.do%s\n", bm.BookmarkableURL))
+		sb.WriteString(fmt.Sprintf("   Date: %s\n", bm.CreatedAt[:10]))
+		if bm.Excerpt != "" {
+			excerpt := bm.Excerpt
+			if len(excerpt) > 200 {
+				excerpt = excerpt[:197] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("   %s\n", excerpt))
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+func (c *CLI) formatBookmarksHTML(bookmarks []client.Bookmark) string {
+	var sb strings.Builder
+	sb.WriteString("<!DOCTYPE html>\n<html lang=\"zh-TW\">\n<head>\n")
+	sb.WriteString("  <meta charset=\"UTF-8\">\n")
+	sb.WriteString("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n")
+	sb.WriteString("  <title>Linux.do Bookmarks</title>\n")
+	sb.WriteString("  <style>\n")
+	sb.WriteString("    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }\n")
+	sb.WriteString("    h1 { color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; }\n")
+	sb.WriteString("    .bookmark { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 8px; }\n")
+	sb.WriteString("    .bookmark:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }\n")
+	sb.WriteString("    .title { font-size: 1.1em; font-weight: bold; margin-bottom: 8px; }\n")
+	sb.WriteString("    .title a { color: #007bff; text-decoration: none; }\n")
+	sb.WriteString("    .title a:hover { text-decoration: underline; }\n")
+	sb.WriteString("    .date { color: #666; font-size: 0.9em; }\n")
+	sb.WriteString("    .excerpt { color: #444; margin-top: 10px; line-height: 1.5; }\n")
+	sb.WriteString("  </style>\n</head>\n<body>\n")
+	sb.WriteString(fmt.Sprintf("  <h1>Linux.do Bookmarks (%d)</h1>\n", len(bookmarks)))
+
+	for _, bm := range bookmarks {
+		url := fmt.Sprintf("https://linux.do%s", bm.BookmarkableURL)
+		sb.WriteString("  <div class=\"bookmark\">\n")
+		sb.WriteString(fmt.Sprintf("    <div class=\"title\"><a href=\"%s\" target=\"_blank\">%s</a></div>\n", url, bm.Title))
+		sb.WriteString(fmt.Sprintf("    <div class=\"date\">%s</div>\n", bm.CreatedAt[:10]))
+		if bm.Excerpt != "" {
+			sb.WriteString(fmt.Sprintf("    <div class=\"excerpt\">%s</div>\n", bm.Excerpt))
+		}
+		sb.WriteString("  </div>\n")
+	}
+
+	sb.WriteString("</body>\n</html>\n")
+	return sb.String()
+}
+
+func (c *CLI) formatBookmarksMD(bookmarks []client.Bookmark) string {
+	var sb strings.Builder
+	sb.WriteString("# Linux.do Bookmarks\n\n")
+	sb.WriteString(fmt.Sprintf("Total: %d bookmarks\n\n", len(bookmarks)))
+	sb.WriteString("---\n\n")
+
+	for i, bm := range bookmarks {
+		url := fmt.Sprintf("https://linux.do%s", bm.BookmarkableURL)
+		sb.WriteString(fmt.Sprintf("## %d. [%s](%s)\n\n", i+1, bm.Title, url))
+		sb.WriteString(fmt.Sprintf("**Date**: %s\n\n", bm.CreatedAt[:10]))
+		if bm.Excerpt != "" {
+			sb.WriteString(fmt.Sprintf("> %s\n\n", bm.Excerpt))
+		}
+		sb.WriteString("---\n\n")
+	}
+
+	return sb.String()
+}
+
+func (c *CLI) clearBookmarks() {
+	fmt.Print("Are you sure you want to delete ALL bookmarks? (yes/no): ")
+	input, _ := c.reader.ReadString('\n')
+	input = strings.TrimSpace(strings.ToLower(input))
+
+	if input != "yes" && input != "y" {
+		fmt.Println("Cancelled.")
+		return
+	}
+
+	fmt.Println("Fetching bookmarks...")
+	bookmarks, err := c.client.GetAllBookmarks()
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+
+	if len(bookmarks) == 0 {
+		fmt.Println("No bookmarks to delete.")
+		return
+	}
+
+	fmt.Printf("Deleting %d bookmarks...\n", len(bookmarks))
+	deleted := 0
+	for i, bm := range bookmarks {
+		if err := c.client.DeleteBookmark(bm.ID); err != nil {
+			fmt.Printf("Failed to delete bookmark %d: %v\n", bm.ID, err)
+			continue
+		}
+		deleted++
+		fmt.Printf("\rDeleted %d/%d", i+1, len(bookmarks))
+	}
+	fmt.Printf("\nSuccessfully deleted %d bookmarks.\n", deleted)
 }
