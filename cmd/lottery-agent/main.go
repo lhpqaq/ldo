@@ -14,11 +14,11 @@ import (
 )
 
 const (
-	stateFile       = ".lottery_agent_state.json"
-	checkInterval   = 5 * time.Minute // 每5分钟检查一次
-	maxTopicsCheck  = 200             // 每次检查前200个话题
-	maxPages        = 4               // 最多加载4页（每页约50条）
-	preloadHistory  = true            // 是否预加载历史回复记录
+	stateFile      = ".lottery_agent_state.json"
+	checkInterval  = 5 * time.Minute // 每5分钟检查一次
+	maxTopicsCheck = 200             // 每次检查前200个话题
+	maxPages       = 4               // 最多加载4页（每页约50条）
+	preloadHistory = true            // 是否预加载历史回复记录
 )
 
 var (
@@ -28,17 +28,40 @@ var (
 		"抽取",
 	}
 
-	// 回复话术
+	// 回复话术 - 通用友好的回复，最少4个字
 	replies = []string{
-		"参与一下",
+		"感谢分享",
 		"谢谢大佬",
 		"参与参与",
-		"感谢分享",
-		"来了来了",
 		"支持支持",
-		"来参与一下",
-		"参与一下，万一中了呢",
-		"来了来了来了",
+		"来了来了",
+		"支持一下",
+		"不错不错",
+		"谢谢佬友",
+		"好帖好帖",
+		"了解一下",
+		"厉害厉害",
+		"优秀优秀",
+		"给力给力",
+		"mark一下",
+	}
+
+	// 随机后缀
+	randomSuffixes = []string{
+		"",
+		"！",
+		"~",
+		"！！",
+		"~~~",
+		" 👍",
+		" 😄",
+		" 🔥",
+	}
+
+	// 单字母前缀（低概率使用）
+	letterPrefixes = []string{
+		"a", "b", "c", "d", "e", "f", "g", "h",
+		"i", "j", "k", "l", "m", "n", "o", "p",
 	}
 )
 
@@ -47,9 +70,16 @@ type AgentState struct {
 	LastCheck     time.Time         `json:"last_check"`     // 上次检查时间
 }
 
+type ReplyTask struct {
+	TopicID int
+	Title   string
+	Content string
+}
+
 type LotteryAgent struct {
-	client *client.Client
-	state  *AgentState
+	client     *client.Client
+	state      *AgentState
+	replyQueue chan ReplyTask
 }
 
 func main() {
@@ -70,8 +100,9 @@ func main() {
 	fmt.Printf("✅ 登录成功! 用户: %s\n", c.GetUsername())
 
 	agent := &LotteryAgent{
-		client: c,
-		state:  loadState(),
+		client:     c,
+		state:      loadState(),
+		replyQueue: make(chan ReplyTask, 100), // 回复队列，最多缓存100个
 	}
 
 	// 预加载历史回复记录
@@ -84,67 +115,70 @@ func main() {
 
 	fmt.Println("🔍 开始监控抽奖帖...")
 	fmt.Printf("⏰ 检查间隔: %v\n", checkInterval)
-	fmt.Println("💬 回复话术:", replies)
+	fmt.Printf("💬 回复话术数量: %d 条\n", len(replies))
 	fmt.Println()
 
-	// 首次检查
-	agent.checkAndReply()
+	// 启动回复线程
+	go agent.replyWorker()
 
-	// 定时检查
+	// 首次检查
+	agent.checkAndEnqueue()
+
+	// 定时检查线程
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		agent.checkAndReply()
+		agent.checkAndEnqueue()
 	}
 }
 
-// preloadRepliedTopics 从服务器预加载用户已回复过的话题
-func (a *LotteryAgent) preloadRepliedTopics() {
-	fmt.Println("📥 正在从服务器加载历史回复记录...")
+// replyWorker 回复工作线程，从队列中取任务并回复
+func (a *LotteryAgent) replyWorker() {
+	for task := range a.replyQueue {
+		// 生成随机回复
+		reply := generateRandomReply()
 
-	repliedTopics, err := a.client.GetUserRepliedTopics()
-	if err != nil {
-		log.Printf("⚠️  加载历史回复失败: %v，继续使用本地记录\n", err)
-		return
-	}
+		// 随机等待 10-30 秒，避免频率限制
+		waitTime := time.Duration(10+rand.Intn(20)) * time.Second
+		fmt.Printf("   ⏳ 等待 %v 后回复...\n", waitTime)
+		time.Sleep(waitTime)
 
-	// 合并到本地状态
-	newCount := 0
-	for topicID := range repliedTopics {
-		if _, exists := a.state.RepliedTopics[topicID]; !exists {
-			a.state.RepliedTopics[topicID] = time.Now()
-			newCount++
+		// 发送回复
+		err := a.client.CreatePost(task.TopicID, reply, 0)
+		if err != nil {
+			log.Printf("   ❌ 回复失败: %v\n", err)
+
+			// 如果是频率限制错误，等待更长时间
+			if strings.Contains(err.Error(), "rate_limit") || strings.Contains(err.Error(), "频率太快") {
+				fmt.Println("   ⚠️  触发频率限制，等待 60 秒...")
+				time.Sleep(60 * time.Second)
+			}
+			continue
 		}
-	}
 
-	if newCount > 0 {
-		fmt.Printf("✅ 从服务器加载了 %d 条新的回复记录\n", newCount)
+		fmt.Printf("   ✅ 已回复: \"%s\"\n", reply)
+
+		// 记录已回复
+		a.state.RepliedTopics[task.TopicID] = time.Now()
 		a.saveState()
-	} else {
-		fmt.Println("✅ 本地记录已是最新")
 	}
-
-	fmt.Printf("📊 总计已回复话题: %d 个\n", len(a.state.RepliedTopics))
 }
 
-func (a *LotteryAgent) checkAndReply() {
+// checkAndEnqueue 检查线程，发现抽奖帖后加入队列
+func (a *LotteryAgent) checkAndEnqueue() {
 	fmt.Printf("\n[%s] 开始检查新帖...\n", time.Now().Format("2006-01-02 15:04:05"))
 
-	// 优先使用未读话题接口
-	topics, err := a.client.GetUnreadTopics()
+	// 从最新话题接口获取
+	topics, err := a.client.GetLatestTopics()
 	if err != nil {
-		log.Printf("⚠️  获取未读话题失败，回退到最新话题: %v\n", err)
-		topics, err = a.client.GetLatestTopics()
-		if err != nil {
-			log.Printf("❌ 获取话题失败: %v\n", err)
-			return
-		}
+		log.Printf("❌ 获取话题失败: %v\n", err)
+		return
 	}
 
 	checked := 0
 	found := 0
-	replied := 0
+	enqueued := 0
 	page := 1
 	moreURL := topics.TopicList.MoreTopicsURL
 
@@ -214,41 +248,59 @@ func (a *LotteryAgent) checkAndReply() {
 			continue
 		}
 
-		// 随机选择一个回复
-		reply := replies[rand.Intn(len(replies))]
-
-		// 等待随机时间（1-5秒），看起来更自然
-		waitTime := time.Duration(1+rand.Intn(4)) * time.Second
-		time.Sleep(waitTime)
-
-		// 发送回复
-		err = a.client.CreatePost(topic.ID, reply, 0)
-		if err != nil {
-			log.Printf("   ❌ 回复失败: %v\n", err)
-			continue
+		// 加入回复队列
+		task := ReplyTask{
+			TopicID: topic.ID,
+			Title:   topic.Title,
+			Content: "",
 		}
 
-		replied++
-		fmt.Printf("   ✅ 已回复: \"%s\"\n", reply)
-
-		// 记录已回复
-		a.state.RepliedTopics[topic.ID] = time.Now()
-		a.saveState()
-
-		// 避免频繁操作，等待一段时间
-		if replied < 3 {
-			time.Sleep(time.Duration(5+rand.Intn(10)) * time.Second)
+		select {
+		case a.replyQueue <- task:
+			enqueued++
+			fmt.Printf("   📥 已加入回复队列 (队列长度: %d)\n", len(a.replyQueue))
+		default:
+			fmt.Printf("   ⚠️  回复队列已满，跳过\n")
 		}
 	}
 
 	a.state.LastCheck = time.Now()
 	a.saveState()
 
-	fmt.Printf("📊 检查完成: 加载了 %d 页，检查了 %d 个话题, 发现 %d 个抽奖帖, 新回复 %d 个\n", page, checked, found, replied)
+	fmt.Printf("📊 检查完成: 加载了 %d 页，检查了 %d 个话题, 发现 %d 个抽奖帖, 加入队列 %d 个\n",
+		page, checked, found, enqueued)
+}
+
+// preloadRepliedTopics 从服务器预加载用户已回复过的话题
+func (a *LotteryAgent) preloadRepliedTopics() {
+	fmt.Println("📥 正在从服务器加载历史回复记录...")
+
+	repliedTopics, err := a.client.GetUserRepliedTopics()
+	if err != nil {
+		log.Printf("⚠️  加载历史回复失败: %v，继续使用本地记录\n", err)
+		return
+	}
+
+	// 合并到本地状态
+	newCount := 0
+	for topicID := range repliedTopics {
+		if _, exists := a.state.RepliedTopics[topicID]; !exists {
+			a.state.RepliedTopics[topicID] = time.Now()
+			newCount++
+		}
+	}
+
+	if newCount > 0 {
+		fmt.Printf("✅ 从服务器加载了 %d 条新的回复记录\n", newCount)
+		a.saveState()
+	} else {
+		fmt.Println("✅ 本地记录已是最新")
+	}
+
+	fmt.Printf("📊 总计已回复话题: %d 个\n", len(a.state.RepliedTopics))
 }
 
 // hasReplied 检查当前用户是否已在该话题中回复过
-// 判断逻辑：遍历话题中的所有帖子，检查是否有当前用户发布的回复（排除第一楼）
 func (a *LotteryAgent) hasReplied(detail *client.TopicDetail) bool {
 	username := a.client.GetUsername()
 
@@ -260,9 +312,6 @@ func (a *LotteryAgent) hasReplied(detail *client.TopicDetail) bool {
 		}
 	}
 
-	// 如果话题有很多回复，可能没有全部加载
-	// 这里我们相对保守：如果已加载的帖子中没找到，就认为没回复过
-	// 因为我们主要关注新帖，通常回复不会太多
 	return false
 }
 
@@ -274,6 +323,26 @@ func containsLotteryKeyword(text string) bool {
 		}
 	}
 	return false
+}
+
+// generateRandomReply 生成随机回复内容，增加多样性
+func generateRandomReply() string {
+	// 10% 概率使用单字母前缀
+	prefix := ""
+	if rand.Float32() < 0.1 {
+		prefix = letterPrefixes[rand.Intn(len(letterPrefixes))] + " "
+	}
+
+	// 随机选择主体
+	body := replies[rand.Intn(len(replies))]
+
+	// 40% 概率添加后缀
+	suffix := ""
+	if rand.Float32() < 0.4 {
+		suffix = randomSuffixes[rand.Intn(len(randomSuffixes))]
+	}
+
+	return prefix + body + suffix
 }
 
 func (a *LotteryAgent) cleanOldRecords() {

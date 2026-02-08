@@ -35,8 +35,8 @@ type Model struct {
 	selected       int
 	topicDetail    *client.TopicDetail
 	posts          []client.Post
-	allPostIDs     []int  // 所有帖子的ID
-	currentPostIdx int    // 当前显示的帖子索引
+	allPostIDs     []int // 所有帖子的ID
+	currentPostIdx int   // 当前显示的帖子索引
 	viewport       viewport.Model
 	composer       textarea.Model
 	jumpInput      textarea.Model
@@ -102,7 +102,7 @@ var (
 
 	helpStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#888888"))
-	
+
 	loadingStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFA500")).
 			Bold(true)
@@ -231,7 +231,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case searchResultMsg:
 		if msg.err == nil {
 			m.searchResults = msg.results
-			m.selected = 0  // 重置选择索引到第一项
+			m.selected = 0 // 重置选择索引到第一项
 		}
 		m.err = msg.err
 	}
@@ -529,7 +529,7 @@ func (m Model) renderTopicList() string {
 
 	start := 0
 	end := len(m.topics)
-	
+
 	if len(m.topics) > maxVisible {
 		halfVisible := maxVisible / 2
 		start = m.selected - halfVisible
@@ -548,16 +548,16 @@ func (m Model) renderTopicList() string {
 
 	for i := start; i < end && i < len(m.topics); i++ {
 		topic := m.topics[i]
-		
+
 		titleWidth := 50
 		if m.width > 100 {
 			titleWidth = m.width - 50
 		}
-		
+
 		truncatedTitle := truncate(topic.Title, titleWidth)
 		paddedTitle := padRight(truncatedTitle, titleWidth)
-		
-		line := fmt.Sprintf("%3d. %s  ↩️ 回复 %4d  👀 浏览 %6d",
+
+		line := fmt.Sprintf("%3d. %s  💬 回复 %4d  👀 浏览 %6d",
 			i+1,
 			paddedTitle,
 			topic.ReplyCount,
@@ -572,7 +572,7 @@ func (m Model) renderTopicList() string {
 	}
 
 	s.WriteString("\n")
-	
+
 	statusLine := fmt.Sprintf("已加载: %d 条", len(m.topics))
 	if m.loading {
 		statusLine += " " + loadingStyle.Render("(加载中...)")
@@ -582,7 +582,7 @@ func (m Model) renderTopicList() string {
 		statusLine += " (已全部加载)"
 	}
 	s.WriteString(helpStyle.Render(statusLine) + "\n")
-	
+
 	helpText := "↑/↓: 移动 | Enter: 打开 | o: 浏览器 | n: 更多 | f: 切换 | g: 刷新 | s: 搜索 | q: 退出"
 	s.WriteString(helpStyle.Render(helpText))
 
@@ -598,7 +598,7 @@ func (m Model) renderTopicView() string {
 	s.WriteString(titleStyle.Render(fmt.Sprintf(" 💬 %s ", m.topicDetail.Title)) + "\n\n")
 	s.WriteString(m.viewport.View())
 	s.WriteString("\n\n")
-	
+
 	// 状态行
 	currentFloor := 1
 	if len(m.posts) > m.currentPostIdx {
@@ -606,7 +606,7 @@ func (m Model) renderTopicView() string {
 	}
 	statusLine := fmt.Sprintf("已加载: %d/%d 楼  当前: %d 楼", len(m.posts), m.topicDetail.PostsCount, currentFloor)
 	s.WriteString(helpStyle.Render(statusLine) + "\n")
-	
+
 	helpText := "r: 回复 | l: 点赞 | o: 浏览器 | n: 更多 | /: 跳转 | G: 末尾 | ↑/↓: 滚动 | Esc: 返回 | q: 退出"
 	s.WriteString(helpStyle.Render(helpText))
 
@@ -622,7 +622,7 @@ func (m Model) renderTopicDetail() string {
 			header = "▶ " + header
 		}
 		s.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4")).Render(header) + "\n\n")
-		
+
 		content := htmlToText(post.Cooked)
 		s.WriteString(wrapText(content, m.width-8) + "\n")
 
@@ -924,7 +924,7 @@ func (m Model) loadMorePosts() tea.Cmd {
 
 		postIDs := m.allPostIDs[currentLen:end]
 		posts, err := m.client.GetPostsByIDs(m.topicDetail.ID, postIDs)
-		
+
 		return morePostsMsg{
 			posts: posts,
 			err:   err,
@@ -1112,27 +1112,27 @@ func htmlToText(html string) string {
 	html = strings.ReplaceAll(html, "<br />", "\n")
 	html = strings.ReplaceAll(html, "</div>", "\n")
 	html = strings.ReplaceAll(html, "</li>", "\n")
-	
+
 	html = strings.ReplaceAll(html, "<pre>", "\n```\n")
 	html = strings.ReplaceAll(html, "</pre>", "\n```\n")
 	html = strings.ReplaceAll(html, "<code>", "`")
 	html = strings.ReplaceAll(html, "</code>", "`")
-	
+
 	html = strings.ReplaceAll(html, "<li>", "• ")
-	
+
 	html = strings.ReplaceAll(html, "<blockquote>", "\n> ")
 	html = strings.ReplaceAll(html, "</blockquote>", "\n")
-	
+
 	re := regexp.MustCompile(`<[^>]*>`)
 	text := re.ReplaceAllString(html, "")
-	
+
 	text = strings.ReplaceAll(text, "&nbsp;", " ")
 	text = strings.ReplaceAll(text, "&lt;", "<")
 	text = strings.ReplaceAll(text, "&gt;", ">")
 	text = strings.ReplaceAll(text, "&amp;", "&")
 	text = strings.ReplaceAll(text, "&quot;", "\"")
 	text = strings.ReplaceAll(text, "&#39;", "'")
-	
+
 	lines := strings.Split(text, "\n")
 	var cleaned []string
 	prevEmpty := false
@@ -1148,7 +1148,7 @@ func htmlToText(html string) string {
 			prevEmpty = false
 		}
 	}
-	
+
 	return strings.TrimSpace(strings.Join(cleaned, "\n"))
 }
 
