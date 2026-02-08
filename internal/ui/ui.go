@@ -23,29 +23,35 @@ const (
 	topicDetailView
 	composerView
 	jumpInputView
+	searchInputView
+	searchResultView
 )
 
 type Model struct {
-	client        *client.Client
-	state         viewState
-	topics        []client.Topic
-	users         map[int]string
-	selected      int
-	topicDetail   *client.TopicDetail
-	posts         []client.Post
-	allPostIDs    []int  // 所有帖子的ID
-	currentPostIdx int   // 当前显示的帖子索引
-	viewport      viewport.Model
-	composer      textarea.Model
-	jumpInput     textarea.Model
-	filter        string
-	err           error
-	width         int
-	height        int
-	ready         bool
-	replyToPost   int
-	moreTopicsURL string
-	loading       bool
+	client         *client.Client
+	state          viewState
+	topics         []client.Topic
+	users          map[int]string
+	selected       int
+	topicDetail    *client.TopicDetail
+	posts          []client.Post
+	allPostIDs     []int  // 所有帖子的ID
+	currentPostIdx int    // 当前显示的帖子索引
+	viewport       viewport.Model
+	composer       textarea.Model
+	jumpInput      textarea.Model
+	searchInput    textarea.Model
+	filter         string
+	err            error
+	width          int
+	height         int
+	ready          bool
+	replyToPost    int
+	moreTopicsURL  string
+	loading        bool
+	searchResults  []client.SearchResult
+	searchQuery    string
+	searchPage     int
 }
 
 type keyMap struct {
@@ -62,6 +68,7 @@ type keyMap struct {
 	LoadMore key.Binding
 	Jump     key.Binding
 	Last     key.Binding
+	Search   key.Binding
 }
 
 var keys = keyMap{
@@ -78,6 +85,7 @@ var keys = keyMap{
 	LoadMore: key.NewBinding(key.WithKeys("n")),
 	Jump:     key.NewBinding(key.WithKeys("/")),
 	Last:     key.NewBinding(key.WithKeys("G")),
+	Search:   key.NewBinding(key.WithKeys("s")),
 }
 
 var (
@@ -116,17 +124,25 @@ func NewModel(c *client.Client) Model {
 	jumpTA.SetHeight(1)
 	jumpTA.ShowLineNumbers = false
 
+	searchTA := textarea.New()
+	searchTA.Placeholder = ""
+	searchTA.CharLimit = 100
+	searchTA.SetWidth(50)
+	searchTA.SetHeight(1)
+	searchTA.ShowLineNumbers = false
+
 	vp := viewport.New(0, 0)
 
 	return Model{
-		client:    c,
-		state:     topicListView,
-		filter:    "latest",
-		composer:  ta,
-		jumpInput: jumpTA,
-		viewport:  vp,
-		users:     make(map[int]string),
-		loading:   false,
+		client:      c,
+		state:       topicListView,
+		filter:      "latest",
+		composer:    ta,
+		jumpInput:   jumpTA,
+		searchInput: searchTA,
+		viewport:    vp,
+		users:       make(map[int]string),
+		loading:     false,
 	}
 }
 
@@ -158,6 +174,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateComposer(msg)
 		case jumpInputView:
 			return m.updateJumpInput(msg)
+		case searchInputView:
+			return m.updateSearchInput(msg)
+		case searchResultView:
+			return m.updateSearchResult(msg)
 		}
 
 	case topicListMsg:
@@ -207,6 +227,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.fetchTopicDetail(m.topicDetail.ID)
 		}
 		m.err = msg.err
+
+	case searchResultMsg:
+		if msg.err == nil {
+			m.searchResults = msg.results
+			m.selected = 0  // 重置选择索引到第一项
+		}
+		m.err = msg.err
 	}
 
 	if m.state == composerView {
@@ -221,6 +248,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.state == jumpInputView {
 		m.jumpInput, cmd = m.jumpInput.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+
+	if m.state == searchInputView {
+		m.searchInput, cmd = m.searchInput.Update(msg)
 		cmds = append(cmds, cmd)
 	}
 
@@ -275,6 +307,12 @@ func (m Model) updateTopicList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.topics = nil
 		m.moreTopicsURL = ""
 		return m, m.fetchTopics
+	case key.Matches(msg, keys.Search):
+		// 进入搜索输入模式
+		m.state = searchInputView
+		m.searchInput.Reset()
+		m.searchInput.Focus()
+		return m, textarea.Blink
 	}
 	return m, nil
 }
@@ -284,7 +322,12 @@ func (m Model) updateTopicDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Quit):
 		return m, tea.Quit
 	case key.Matches(msg, keys.Back):
-		m.state = topicListView
+		// 如果有搜索结果，返回搜索结果页面；否则返回话题列表
+		if len(m.searchResults) > 0 {
+			m.state = searchResultView
+		} else {
+			m.state = topicListView
+		}
 	case key.Matches(msg, keys.Open):
 		if m.topicDetail != nil {
 			openInBrowser(fmt.Sprintf("https://linux.do/t/%d", m.topicDetail.ID))
@@ -365,6 +408,71 @@ func (m Model) updateJumpInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+func (m Model) updateSearchInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.state = topicListView
+		m.searchInput.Reset()
+		return m, nil
+	case tea.KeyEnter:
+		query := strings.TrimSpace(m.searchInput.Value())
+		if query != "" {
+			m.searchQuery = query
+			m.searchPage = 1
+			m.state = searchResultView
+			m.selected = 0
+			return m, m.performSearch(query, 1)
+		}
+		m.state = topicListView
+		m.searchInput.Reset()
+		return m, nil
+	default:
+		var cmd tea.Cmd
+		m.searchInput, cmd = m.searchInput.Update(msg)
+		return m, cmd
+	}
+}
+
+func (m Model) updateSearchResult(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Quit):
+		return m, tea.Quit
+	case key.Matches(msg, keys.Back):
+		m.state = topicListView
+		m.searchResults = nil
+	case key.Matches(msg, keys.Up):
+		if m.selected > 0 {
+			m.selected--
+		}
+	case key.Matches(msg, keys.Down):
+		if m.selected < len(m.searchResults)-1 {
+			m.selected++
+		}
+	case key.Matches(msg, keys.Enter):
+		if len(m.searchResults) > 0 {
+			m.state = topicDetailView
+			topicID := m.searchResults[m.selected].TopicID
+			return m, m.fetchTopicDetail(topicID)
+		}
+	case key.Matches(msg, keys.Open):
+		if len(m.searchResults) > 0 {
+			topicID := m.searchResults[m.selected].TopicID
+			openInBrowser(fmt.Sprintf("https://linux.do/t/%d", topicID))
+		}
+	case key.Matches(msg, keys.LoadMore):
+		// 加载下一页搜索结果
+		m.searchPage++
+		return m, m.performSearch(m.searchQuery, m.searchPage)
+	case key.Matches(msg, keys.Search):
+		// 重新搜索
+		m.state = searchInputView
+		m.searchInput.Reset()
+		m.searchInput.Focus()
+		return m, textarea.Blink
+	}
+	return m, nil
+}
+
 func (m Model) View() string {
 	if !m.ready {
 		return "\n  初始化中..."
@@ -379,6 +487,10 @@ func (m Model) View() string {
 		return m.renderComposer()
 	case jumpInputView:
 		return m.renderJumpInput()
+	case searchInputView:
+		return m.renderSearchInput()
+	case searchResultView:
+		return m.renderSearchResult()
 	}
 
 	return ""
@@ -471,7 +583,7 @@ func (m Model) renderTopicList() string {
 	}
 	s.WriteString(helpStyle.Render(statusLine) + "\n")
 	
-	helpText := "↑/↓: 移动 | Enter: 打开 | o: 浏览器 | n: 更多 | f: 切换 | g: 刷新 | q: 退出"
+	helpText := "↑/↓: 移动 | Enter: 打开 | o: 浏览器 | n: 更多 | f: 切换 | g: 刷新 | s: 搜索 | q: 退出"
 	s.WriteString(helpStyle.Render(helpText))
 
 	return s.String()
@@ -546,6 +658,139 @@ func (m Model) renderJumpInput() string {
 	return s.String()
 }
 
+func (m Model) renderSearchInput() string {
+	var s strings.Builder
+	s.WriteString(titleStyle.Render(" 🔍 搜索 ") + "\n\n")
+	s.WriteString(m.searchInput.View() + "\n\n")
+	helpText := "Enter: 搜索 | Esc: 取消"
+	s.WriteString(helpStyle.Render(helpText))
+	return s.String()
+}
+
+func (m Model) renderSearchResult() string {
+	var s strings.Builder
+
+	title := fmt.Sprintf(" 🔍 搜索结果: %s (第 %d 页) ", m.searchQuery, m.searchPage)
+	s.WriteString(titleStyle.Render(title) + "\n\n")
+
+	if m.err != nil {
+		s.WriteString(fmt.Sprintf("❌ 错误: %v\n\n", m.err))
+	}
+
+	if len(m.searchResults) == 0 {
+		s.WriteString("没有找到相关结果\n\n")
+		helpText := "s: 重新搜索 | Esc: 返回 | q: 退出"
+		s.WriteString(helpStyle.Render(helpText))
+		return s.String()
+	}
+
+	// 每个结果占3行（标题、信息、内容）+ 1行空白 = 4行
+	linesPerResult := 4
+	availableLines := m.height - 8 // 减去标题、状态栏等
+	if availableLines < 20 {
+		availableLines = 20
+	}
+
+	maxVisible := availableLines / linesPerResult
+	if maxVisible < 3 {
+		maxVisible = 3
+	}
+
+	// 简单的滚动逻辑：确保选中项可见
+	start := 0
+	end := len(m.searchResults)
+
+	if len(m.searchResults) > maxVisible {
+		// 如果选中项在可见范围之外，调整起始位置
+		if m.selected >= maxVisible {
+			start = m.selected - maxVisible + 1
+		}
+		end = start + maxVisible
+
+		if end > len(m.searchResults) {
+			end = len(m.searchResults)
+			start = end - maxVisible
+			if start < 0 {
+				start = 0
+			}
+		}
+	}
+
+	// 高亮样式
+	highlightStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#FFFF00")).
+		Bold(true)
+
+	// 左侧光标样式 - 使用半方块字符
+	cursorStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#7D56F4")).
+		Bold(true)
+
+	for i := start; i < end && i < len(m.searchResults); i++ {
+		result := m.searchResults[i]
+
+		// 提取标题和摘要（先截断再高亮，避免重复高亮）
+		titleText := stripHTMLTags(result.TopicTitle)
+		if titleText == "" {
+			titleText = fmt.Sprintf("话题 #%d", result.TopicID)
+		}
+
+		blurbText := stripHTMLTags(result.Blurb)
+
+		// 先截断过长的文本
+		maxTitleWidth := 60
+		maxBlurbWidth := 70
+		if m.width > 100 {
+			maxTitleWidth = m.width - 40
+			maxBlurbWidth = m.width - 30
+		}
+
+		titleText = truncate(titleText, maxTitleWidth)
+		blurbText = truncate(blurbText, maxBlurbWidth)
+
+		// 然后高亮关键词
+		titleText = highlightKeywords(titleText, m.searchQuery, highlightStyle)
+		blurbText = highlightKeywords(blurbText, m.searchQuery, highlightStyle)
+
+		// 构建显示行
+		headerLine := fmt.Sprintf("%3d. 📝 %s", i+1, titleText)
+		infoLine := fmt.Sprintf("     👤 @%-15s  #%d楼  ❤️ %d",
+			truncate(result.Username, 15),
+			result.PostNumber,
+			result.LikeCount,
+		)
+		contentLine := fmt.Sprintf("     %s", blurbText)
+
+		if i == m.selected {
+			// 选中项：左侧显示三行美观光标（半方块字符）
+			cursor := cursorStyle.Render("▌")
+			s.WriteString(cursor + " " + headerLine + "\n")
+			s.WriteString(cursor + " " + infoLine + "\n")
+			s.WriteString(cursor + " " + contentLine + "\n")
+		} else {
+			// 非选中项：左侧空白对齐
+			s.WriteString("  " + headerLine + "\n")
+			s.WriteString("  " + helpStyle.Render(infoLine) + "\n")
+			s.WriteString("  " + contentLine + "\n")
+		}
+
+		if i < end-1 {
+			s.WriteString("\n")
+		}
+	}
+
+	s.WriteString("\n")
+
+	statusLine := fmt.Sprintf("第 %d 页 | 共 %d 条结果 | 当前: %d/%d | 显示: %d-%d",
+		m.searchPage, len(m.searchResults), m.selected+1, len(m.searchResults), start+1, end)
+	s.WriteString(helpStyle.Render(statusLine) + "\n")
+
+	helpText := "↑/↓: 滚动 | Enter: 查看详情 | o: 浏览器 | n: 下一页 | s: 重新搜索 | Esc: 返回 | q: 退出"
+	s.WriteString(helpStyle.Render(helpText))
+
+	return s.String()
+}
+
 func (m Model) isLiked(post client.Post) bool {
 	for _, action := range post.ActionsSummary {
 		if action.ID == 2 && action.Acted {
@@ -583,6 +828,11 @@ type jumpToPostMsg struct {
 
 type postCreatedMsg struct {
 	err error
+}
+
+type searchResultMsg struct {
+	results []client.SearchResult
+	err     error
 }
 
 func (m Model) fetchTopics() tea.Msg {
@@ -746,6 +996,19 @@ func (m Model) jumpToLast() tea.Cmd {
 	}
 }
 
+func (m Model) performSearch(query string, page int) tea.Cmd {
+	return func() tea.Msg {
+		results, err := m.client.Search(query, page)
+		if err != nil {
+			return searchResultMsg{err: err}
+		}
+
+		return searchResultMsg{
+			results: results.Posts,
+		}
+	}
+}
+
 func (m Model) createPost(topicID int, content string, replyTo int) tea.Cmd {
 	return func() tea.Msg {
 		err := m.client.CreatePost(topicID, content, replyTo)
@@ -894,4 +1157,63 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// stripHTMLTags 去除HTML标签，只保留纯文本
+func stripHTMLTags(html string) string {
+	// 去除所有HTML标签
+	re := regexp.MustCompile(`<[^>]*>`)
+	text := re.ReplaceAllString(html, "")
+
+	// 解码HTML实体
+	text = strings.ReplaceAll(text, "&nbsp;", " ")
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&quot;", "\"")
+	text = strings.ReplaceAll(text, "&#39;", "'")
+
+	// 清理多余的空白
+	text = strings.Join(strings.Fields(text), " ")
+
+	return strings.TrimSpace(text)
+}
+
+// highlightKeywords 高亮关键词
+func highlightKeywords(text string, keyword string, style lipgloss.Style) string {
+	if keyword == "" {
+		return text
+	}
+
+	// 不区分大小写搜索
+	lowerText := strings.ToLower(text)
+	lowerKeyword := strings.ToLower(keyword)
+
+	// 查找所有匹配位置
+	var result strings.Builder
+	lastIndex := 0
+
+	for {
+		index := strings.Index(lowerText[lastIndex:], lowerKeyword)
+		if index == -1 {
+			// 没有更多匹配，添加剩余文本
+			result.WriteString(text[lastIndex:])
+			break
+		}
+
+		// 调整索引到原文本位置
+		actualIndex := lastIndex + index
+
+		// 添加匹配前的文本
+		result.WriteString(text[lastIndex:actualIndex])
+
+		// 添加高亮的关键词
+		matchedText := text[actualIndex : actualIndex+len(keyword)]
+		result.WriteString(style.Render(matchedText))
+
+		// 更新位置
+		lastIndex = actualIndex + len(keyword)
+	}
+
+	return result.String()
 }

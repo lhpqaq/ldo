@@ -12,16 +12,20 @@ import (
 )
 
 type CLI struct {
-	client       *client.Client
-	currentTopic *client.TopicDetail
-	posts        []client.Post
-	allPostIDs   []int
-	currentIdx   int
-	topics       []client.Topic
-	users        map[int]string
-	filter       string
-	moreURL      string
-	reader       *bufio.Reader
+	client         *client.Client
+	currentTopic   *client.TopicDetail
+	posts          []client.Post
+	allPostIDs     []int
+	currentIdx     int
+	topics         []client.Topic
+	users          map[int]string
+	filter         string
+	moreURL        string
+	reader         *bufio.Reader
+	searchResults  []client.SearchResult
+	searchQuery    string
+	searchPage     int
+	isSearchMode   bool
 }
 
 func NewCLI(c *client.Client) *CLI {
@@ -81,6 +85,8 @@ func (c *CLI) Run() {
 			c.cmdFilter(args)
 		case "refresh":
 			c.cmdRefresh()
+		case "search", "find":
+			c.cmdSearch(args)
 		case "clear":
 			fmt.Print("\033[H\033[2J")
 		case "help", "?":
@@ -123,6 +129,34 @@ func (c *CLI) loadTopics() {
 }
 
 func (c *CLI) cmdList(args []string) {
+	// 如果在搜索模式，显示搜索结果
+	if c.isSearchMode {
+		if len(c.searchResults) == 0 {
+			fmt.Println("No search results")
+			return
+		}
+
+		fmt.Printf("\nSearch Results for '%s' (page %d):\n", c.searchQuery, c.searchPage)
+		fmt.Println(strings.Repeat("-", 80))
+
+		for i, result := range c.searchResults {
+			blurb := result.Blurb
+			if len(blurb) > 70 {
+				blurb = blurb[:67] + "..."
+			}
+
+			fmt.Printf("%3d. @%-15s [Topic #%d, Floor #%d] ❤️ %d\n",
+				i+1, result.Username, result.TopicID, result.PostNumber, result.LikeCount)
+			fmt.Printf("     %s\n", blurb)
+			fmt.Println()
+		}
+
+		fmt.Println(strings.Repeat("-", 80))
+		fmt.Printf("Page %d | Total: %d results\n", c.searchPage, len(c.searchResults))
+		return
+	}
+
+	// 原来的话题列表显示
 	if len(c.topics) == 0 {
 		fmt.Println("No topics loaded")
 		return
@@ -160,17 +194,34 @@ func (c *CLI) cmdList(args []string) {
 
 func (c *CLI) cmdOpen(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: open <topic_number>")
+		fmt.Println("Usage: open <number>")
 		return
 	}
 
 	idx, err := strconv.Atoi(args[0])
-	if err != nil || idx < 1 || idx > len(c.topics) {
-		fmt.Printf("Invalid topic number: %s\n", args[0])
+	if err != nil || idx < 1 {
+		fmt.Printf("Invalid number: %s\n", args[0])
 		return
 	}
 
-	topicID := c.topics[idx-1].ID
+	var topicID int
+
+	// 在搜索模式下，从搜索结果中获取 topicID
+	if c.isSearchMode {
+		if idx > len(c.searchResults) {
+			fmt.Printf("Invalid search result number: %d\n", idx)
+			return
+		}
+		topicID = c.searchResults[idx-1].TopicID
+	} else {
+		// 正常模式，从话题列表获取
+		if idx > len(c.topics) {
+			fmt.Printf("Invalid topic number: %d\n", idx)
+			return
+		}
+		topicID = c.topics[idx-1].ID
+	}
+
 	detail, err := c.client.GetTopic(topicID)
 	if err != nil {
 		fmt.Printf("Error loading topic: %v\n", err)
@@ -191,6 +242,8 @@ func (c *CLI) cmdCD(args []string) {
 		c.currentTopic = nil
 		c.posts = nil
 		c.allPostIDs = nil
+		c.isSearchMode = false
+		c.searchResults = nil
 		fmt.Println("Back to topic list")
 		return
 	}
@@ -199,6 +252,8 @@ func (c *CLI) cmdCD(args []string) {
 		c.currentTopic = nil
 		c.posts = nil
 		c.allPostIDs = nil
+		c.isSearchMode = false
+		c.searchResults = nil
 		fmt.Println("Back to topic list")
 		return
 	}
@@ -289,6 +344,13 @@ func (c *CLI) displayPost(post client.Post) {
 
 func (c *CLI) cmdMore() {
 	if c.currentTopic == nil {
+		// 在搜索模式下，加载下一页搜索结果
+		if c.isSearchMode {
+			c.searchPage++
+			c.performSearch(c.searchQuery, c.searchPage)
+			return
+		}
+
 		// Load more topics
 		if c.moreURL == "" {
 			fmt.Println("No more topics to load")
@@ -508,6 +570,9 @@ func (c *CLI) cmdRefresh() {
 		c.posts = detail.PostStream.Posts
 		c.allPostIDs = detail.PostStream.Stream
 		fmt.Println("Topic refreshed")
+	} else if c.isSearchMode {
+		// Refresh search results
+		c.performSearch(c.searchQuery, c.searchPage)
 	} else {
 		// Refresh topic list
 		c.topics = nil
@@ -515,6 +580,56 @@ func (c *CLI) cmdRefresh() {
 		c.loadTopics()
 		fmt.Println("Topic list refreshed")
 	}
+}
+
+func (c *CLI) cmdSearch(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: search <query>")
+		fmt.Println("Example: search mcp")
+		return
+	}
+
+	query := strings.Join(args, " ")
+	c.searchQuery = query
+	c.searchPage = 1
+	c.isSearchMode = true
+	c.performSearch(query, 1)
+}
+
+func (c *CLI) performSearch(query string, page int) {
+	fmt.Printf("Searching for '%s' (page %d)...\n", query, page)
+
+	results, err := c.client.Search(query, page)
+	if err != nil {
+		fmt.Printf("Search failed: %v\n", err)
+		return
+	}
+
+	c.searchResults = results.Posts
+	c.searchPage = page
+
+	if len(results.Posts) == 0 {
+		fmt.Println("No results found")
+		return
+	}
+
+	fmt.Printf("\nSearch Results (%d results):\n", len(results.Posts))
+	fmt.Println(strings.Repeat("-", 80))
+
+	for i, result := range results.Posts {
+		blurb := result.Blurb
+		if len(blurb) > 70 {
+			blurb = blurb[:67] + "..."
+		}
+
+		fmt.Printf("%3d. @%-15s [Topic #%d, Floor #%d] ❤️ %d\n",
+			i+1, result.Username, result.TopicID, result.PostNumber, result.LikeCount)
+		fmt.Printf("     %s\n", blurb)
+		fmt.Println()
+	}
+
+	fmt.Println(strings.Repeat("-", 80))
+	fmt.Printf("Page %d | Use 'open <n>' to view topic | 'more' for next page | 'cd ..' to exit search\n", page)
 }
 
 func (c *CLI) cmdHelp() {
@@ -527,6 +642,11 @@ Navigation:
   cd <n>          - Change to topic (same as open)
   cd .. / cd      - Go back to topic list
   pwd             - Show current location
+
+Search:
+  search <query>  - Search posts by keyword
+  find <query>    - Alias for search
+  more            - Load next page of search results
 
 Reading:
   cat [floor]     - View post (default: first post)
@@ -548,6 +668,7 @@ Management:
   exit / quit / q - Exit
 
 Examples:
+  search mcp      - Search for posts containing "mcp"
   ls 50           - List first 50 topics
   open 3          - Open topic #3
   cat 10          - View floor #10

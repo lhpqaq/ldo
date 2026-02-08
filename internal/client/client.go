@@ -72,6 +72,35 @@ type Post struct {
 	ActionsSummary []ActionSummary `json:"actions_summary"`
 }
 
+type SearchResult struct {
+	ID             int    `json:"id"`
+	Name           string `json:"name"`
+	Username       string `json:"username"`
+	AvatarTemplate string `json:"avatar_template"`
+	CreatedAt      string `json:"created_at"`
+	LikeCount      int    `json:"like_count"`
+	Blurb          string `json:"blurb"`
+	PostNumber     int    `json:"post_number"`
+	TopicID        int    `json:"topic_id"`
+	TopicTitle     string `json:"topic_title_headline"`
+}
+
+type SearchResponse struct {
+	Posts          []SearchResult         `json:"posts"`
+	Topics         []Topic                `json:"topics"`
+	GroupedResults map[string]interface{} `json:"grouped_search_result,omitempty"`
+}
+
+// GetTopicTitle 根据 topic_id 获取话题标题
+func (s *SearchResponse) GetTopicTitle(topicID int) string {
+	for _, topic := range s.Topics {
+		if topic.ID == topicID {
+			return topic.Title
+		}
+	}
+	return ""
+}
+
 type ActionSummary struct {
 	ID    int  `json:"id"`
 	Acted bool `json:"acted"`
@@ -482,7 +511,7 @@ func (c *Client) GetUsername() string {
 
 func (c *Client) GetMoreTopics(moreURL string) (*TopicList, error) {
 	fullURL := c.baseURL + moreURL
-	
+
 	req, _ := http.NewRequest(http.MethodGet, fullURL, nil)
 	req.Header = c.headers.Clone()
 	req.Header.Set("Accept", "application/json")
@@ -506,4 +535,114 @@ func (c *Client) GetMoreTopics(moreURL string) (*TopicList, error) {
 	}
 
 	return &topicList, nil
+}
+
+func (c *Client) GetUnreadTopics() (*TopicList, error) {
+	return c.getTopics("/unread.json")
+}
+
+// UserAction 表示用户的一个动作（发帖或回复）
+type UserAction struct {
+	ActionType int    `json:"action_type"` // 4=发帖, 5=回复
+	TopicID    int    `json:"topic_id"`
+	PostNumber int    `json:"post_number"`
+	Username   string `json:"username"`
+}
+
+type UserActionsResponse struct {
+	UserActions []UserAction `json:"user_actions"`
+}
+
+// GetUserRepliedTopics 获取用户已回复过的所有话题ID
+func (c *Client) GetUserRepliedTopics() (map[int]bool, error) {
+	repliedTopics := make(map[int]bool)
+	offset := 0
+	limit := 30 // 每次获取30条
+
+	for {
+		url := fmt.Sprintf("%s/user_actions.json?offset=%d&username=%s&filter=4,5",
+			c.baseURL, offset, c.username)
+
+		req, _ := http.NewRequest(http.MethodGet, url, nil)
+		req.Header = c.headers.Clone()
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("X-CSRF-Token", c.csrfToken)
+		req.Header.Set("X-Requested-With", "XMLHttpRequest")
+
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return repliedTopics, err
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == 403 {
+			return repliedTopics, fmt.Errorf("被 Cloudflare 拦截 (403)")
+		}
+
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		var result UserActionsResponse
+		if err := json.Unmarshal(bodyBytes, &result); err != nil {
+			return repliedTopics, err
+		}
+
+		// 没有更多数据了
+		if len(result.UserActions) == 0 {
+			break
+		}
+
+		// 收集已回复的话题ID
+		for _, action := range result.UserActions {
+			// action_type=5 表示回复，post_number>1 表示不是楼主帖
+			if action.ActionType == 5 && action.PostNumber > 1 {
+				repliedTopics[action.TopicID] = true
+			}
+		}
+
+		// 如果返回的数量少于limit，说明已经是最后一页了
+		if len(result.UserActions) < limit {
+			break
+		}
+
+		offset += limit
+	}
+
+	return repliedTopics, nil
+}
+
+// Search 搜索帖子
+func (c *Client) Search(query string, page int) (*SearchResponse, error) {
+	if page < 1 {
+		page = 1
+	}
+
+	searchURL := fmt.Sprintf("%s/search?q=%s&page=%d", c.baseURL, url.QueryEscape(query), page)
+
+	req, _ := http.NewRequest(http.MethodGet, searchURL, nil)
+	req.Header = c.headers.Clone()
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-CSRF-Token", c.csrfToken)
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 403 {
+		return nil, fmt.Errorf("被 Cloudflare 拦截 (403)")
+	}
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var searchResp SearchResponse
+	if err := json.Unmarshal(bodyBytes, &searchResp); err != nil {
+		return nil, err
+	}
+
+	// 填充每个搜索结果的标题
+	for i := range searchResp.Posts {
+		searchResp.Posts[i].TopicTitle = searchResp.GetTopicTitle(searchResp.Posts[i].TopicID)
+	}
+
+	return &searchResp, nil
 }
