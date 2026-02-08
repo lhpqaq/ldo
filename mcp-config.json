@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "linuxdo": {
+      "command": "/path/to/your/mcp-server",
+      "args": [],
+      "env": {
+        "LINUXDO_USERNAME": "your_username",
+        "LINUXDO_PASSWORD": "your_password"
+      }
+    }
+  }
+}
