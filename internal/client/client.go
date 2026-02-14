@@ -122,8 +122,20 @@ func NewClient(baseURL, username, password string) (*Client, error) {
 		tls_client.WithRandomTLSExtensionOrder(),
 	}
 
+	proxyURL, proxySource, err := resolveSystemProxy(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("系统代理配置错误: %w", err)
+	}
+	if proxyURL != "" {
+		options = append(options, tls_client.WithProxyUrl(proxyURL))
+		fmt.Fprintf(os.Stderr, "ℹ️  使用系统代理 (%s): %s\n", proxySource, sanitizeProxyForLog(proxyURL))
+	}
+
 	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
 	if err != nil {
+		if proxyURL != "" {
+			return nil, fmt.Errorf("系统代理初始化失败: %w", err)
+		}
 		return nil, err
 	}
 
@@ -147,10 +159,10 @@ func NewClient(baseURL, username, password string) (*Client, error) {
 
 	if err := c.loadCookies(); err == nil {
 		if c.verifyCookies() {
-			fmt.Println("✅ 使用已保存的登录状态")
+			fmt.Fprintln(os.Stderr, "✅ 使用已保存的登录状态")
 			return c, nil
 		}
-		fmt.Println("⚠️  已保存的登录状态已失效，重新登录...")
+		fmt.Fprintln(os.Stderr, "⚠️  已保存的登录状态已失效，重新登录...")
 	}
 
 	if err := c.warmup(); err != nil {
@@ -162,12 +174,80 @@ func NewClient(baseURL, username, password string) (*Client, error) {
 	}
 
 	if err := c.saveCookies(); err != nil {
-		fmt.Printf("⚠️  保存 Cookie 失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "⚠️  保存 Cookie 失败: %v\n", err)
 	} else {
-		fmt.Println("✅ 登录状态已保存")
+		fmt.Fprintln(os.Stderr, "✅ 登录状态已保存")
 	}
 
 	return c, nil
+}
+
+func resolveSystemProxy(baseURL string) (proxyURL string, proxySource string, err error) {
+	parsedBaseURL, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return "", "", fmt.Errorf("baseURL 无效: %w", err)
+	}
+	if parsedBaseURL.Scheme == "" {
+		return "", "", fmt.Errorf("baseURL 无效: 缺少 scheme")
+	}
+
+	switch strings.ToLower(parsedBaseURL.Scheme) {
+	case "https":
+		if value, source := firstNonEmptyEnv("HTTPS_PROXY", "https_proxy"); value != "" {
+			return validateProxyURL(value, source)
+		}
+		if value, source := firstNonEmptyEnv("HTTP_PROXY", "http_proxy"); value != "" {
+			return validateProxyURL(value, source)
+		}
+	case "http":
+		if value, source := firstNonEmptyEnv("HTTP_PROXY", "http_proxy"); value != "" {
+			return validateProxyURL(value, source)
+		}
+	default:
+		return "", "", fmt.Errorf("baseURL 使用了不支持的 scheme: %s", parsedBaseURL.Scheme)
+	}
+
+	return "", "", nil
+}
+
+func firstNonEmptyEnv(keys ...string) (value string, source string) {
+	for _, key := range keys {
+		v := strings.TrimSpace(os.Getenv(key))
+		if v != "" {
+			return v, key
+		}
+	}
+	return "", ""
+}
+
+func validateProxyURL(proxyURL string, source string) (string, string, error) {
+	parsedProxy, err := url.Parse(proxyURL)
+	if err != nil {
+		return "", "", fmt.Errorf("%s 无效: %w", source, err)
+	}
+	if parsedProxy.Scheme == "" || parsedProxy.Host == "" {
+		return "", "", fmt.Errorf("%s 无效: 需要完整的 proxy URL（例如 http://127.0.0.1:7890）", source)
+	}
+
+	return proxyURL, source, nil
+}
+
+func sanitizeProxyForLog(proxyURL string) string {
+	parsedProxy, err := url.Parse(proxyURL)
+	if err != nil {
+		return "<invalid proxy url>"
+	}
+
+	if parsedProxy.User != nil {
+		username := parsedProxy.User.Username()
+		if username != "" {
+			parsedProxy.User = url.UserPassword(username, "******")
+		} else {
+			parsedProxy.User = url.User("******")
+		}
+	}
+
+	return parsedProxy.String()
 }
 
 func (c *Client) getCookieFilePath() string {
@@ -389,7 +469,7 @@ func (c *Client) GetPostsByIDs(topicID int, postIDs []int) ([]Post, error) {
 	postIDsParam := strings.Join(postIDStrs, ",")
 
 	url := fmt.Sprintf("%s/t/%d/posts.json?post_ids[]=%s", c.baseURL, topicID, postIDsParam)
-	
+
 	req, _ := http.NewRequest(http.MethodGet, url, nil)
 	req.Header = c.headers.Clone()
 	req.Header.Set("Accept", "application/json")
@@ -458,7 +538,7 @@ func (c *Client) CreatePost(topicID int, raw string, replyToPostNumber int) erro
 
 func (c *Client) LikePost(postID int) error {
 	payload := map[string]any{
-		"id":                   postID,
+		"id":                  postID,
 		"post_action_type_id": 2,
 	}
 

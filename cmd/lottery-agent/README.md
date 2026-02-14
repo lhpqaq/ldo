@@ -51,7 +51,11 @@ go build -o lottery-agent cmd/lottery-agent/main.go
 ```bash
 export LINUXDO_USERNAME="your_username"
 export LINUXDO_PASSWORD="your_password"
+export HTTPS_PROXY="http://127.0.0.1:7890"  # 可选
+export NO_PROXY="localhost,127.0.0.1"       # 可选
 ```
+
+说明：程序会自动读取 `HTTPS_PROXY` / `HTTP_PROXY`（含小写形式），`HTTPS_PROXY` 优先。代理 URL 非法时会直接启动失败，不会降级直连。
 
 ### 运行
 

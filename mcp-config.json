@@ -5,7 +5,8 @@
       "args": [],
       "env": {
         "LINUXDO_USERNAME": "your_username",
-        "LINUXDO_PASSWORD": "your_password"
+        "LINUXDO_PASSWORD": "your_password",
+        "HTTPS_PROXY": "http://127.0.0.1:7890"
       }
     }
   }
