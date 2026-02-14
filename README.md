@@ -49,6 +49,32 @@ echo 'export LINUXDO_PASSWORD="your_password"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
+### 系统代理（可选）
+
+客户端会自动读取系统代理环境变量（同时支持大写和小写）：
+
+- `HTTPS_PROXY` / `https_proxy`（访问 `https://` 目标时优先）
+- `HTTP_PROXY` / `http_proxy`（`HTTPS_PROXY` 未设置时回退）
+- `NO_PROXY` / `no_proxy`（当前仅透传环境变量，不保证与标准库完全一致）
+
+示例（Linux/macOS）：
+
+```bash
+export HTTPS_PROXY="http://127.0.0.1:7890"
+# 可选：不走代理的域名
+export NO_PROXY="localhost,127.0.0.1"
+```
+
+示例（Windows PowerShell）：
+
+```powershell
+$env:HTTPS_PROXY="http://127.0.0.1:7890"
+# 可选：不走代理的域名
+$env:NO_PROXY="localhost,127.0.0.1"
+```
+
+注意：如果代理 URL 格式非法，程序会在启动时直接报错退出，不会自动降级直连。
+
 ## 使用方法
 
 ### TUI 模式（默认）

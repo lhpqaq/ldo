@@ -137,9 +137,13 @@ go build -o mcp-server ./cmd/mcp-server
 ```bash
 export LINUXDO_USERNAME="your_username"
 export LINUXDO_PASSWORD="your_password"
+export HTTPS_PROXY="http://127.0.0.1:7890"  # 可选
+export NO_PROXY="localhost,127.0.0.1"       # 可选
 ```
 
 或者在 MCP 客户端配置文件中设置。
+
+说明：MCP Server 会自动读取 `HTTPS_PROXY` / `HTTP_PROXY`（含小写形式），`HTTPS_PROXY` 优先。代理 URL 非法时会直接启动失败，不会降级直连。
 
 ### 2. Claude Desktop 配置
 
@@ -159,7 +163,8 @@ export LINUXDO_PASSWORD="your_password"
       "args": [],
       "env": {
         "LINUXDO_USERNAME": "your_username",
-        "LINUXDO_PASSWORD": "your_password"
+        "LINUXDO_PASSWORD": "your_password",
+        "HTTPS_PROXY": "http://127.0.0.1:7890"
       }
     }
   }
@@ -178,7 +183,8 @@ export LINUXDO_PASSWORD="your_password"
       "command": "/absolute/path/to/mcp-server",
       "env": {
         "LINUXDO_USERNAME": "your_username",
-        "LINUXDO_PASSWORD": "your_password"
+        "LINUXDO_PASSWORD": "your_password",
+        "HTTPS_PROXY": "http://127.0.0.1:7890"
       }
     }
   }
@@ -202,6 +208,7 @@ export LINUXDO_PASSWORD="your_password"
 ```bash
 export LINUXDO_USERNAME="your_username"
 export LINUXDO_PASSWORD="your_password"
+export HTTPS_PROXY="http://127.0.0.1:7890"  # 可选
 ./mcp-server
 ```
 
