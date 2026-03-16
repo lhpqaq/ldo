@@ -609,6 +609,179 @@ func (c *Client) GetUserRepliedTopics() (map[int]bool, error) {
 	return repliedTopics, nil
 }
 
+// Bookmark 書籤結構
+type Bookmark struct {
+	ID              int    `json:"id"`
+	Name            string `json:"name"`
+	ReminderAt      string `json:"reminder_at"`
+	Pinned          bool   `json:"pinned"`
+	Title           string `json:"title"`
+	FancyTitle      string `json:"fancy_title"`
+	Excerpt         string `json:"excerpt"`
+	BookmarkableID  int    `json:"bookmarkable_id"`
+	BookmarkableURL string `json:"bookmarkable_url"`
+	BookmarkableType string `json:"bookmarkable_type"`
+	CreatedAt       string `json:"created_at"`
+}
+
+// BookmarkResponse 書籤回應結構
+type BookmarkResponse struct {
+	UserBookmarkList struct {
+		Bookmarks        []Bookmark `json:"bookmarks"`
+		MoreBookmarksURL string     `json:"more_bookmarks_url"`
+	} `json:"user_bookmark_list"`
+}
+
+// GetBookmarks 獲取用戶書籤（單頁）
+func (c *Client) GetBookmarks() (*BookmarkResponse, error) {
+	return c.getBookmarksPage("")
+}
+
+// getBookmarksPage 獲取指定頁面的書籤
+func (c *Client) getBookmarksPage(moreURL string) (*BookmarkResponse, error) {
+	var reqURL string
+	if moreURL == "" {
+		reqURL = fmt.Sprintf("%s/u/%s/bookmarks.json", c.baseURL, c.username)
+	} else {
+		reqURL = c.baseURL + moreURL
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, reqURL, nil)
+	req.Header = c.headers.Clone()
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-CSRF-Token", c.csrfToken)
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 403 {
+		return nil, fmt.Errorf("被 Cloudflare 拦截 (403)")
+	}
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var bookmarkResp BookmarkResponse
+	if err := json.Unmarshal(bodyBytes, &bookmarkResp); err != nil {
+		return nil, err
+	}
+
+	return &bookmarkResp, nil
+}
+
+// GetAllBookmarks 獲取所有書籤（處理分頁）
+func (c *Client) GetAllBookmarks() ([]Bookmark, error) {
+	var allBookmarks []Bookmark
+
+	resp, err := c.GetBookmarks()
+	if err != nil {
+		return nil, err
+	}
+	allBookmarks = append(allBookmarks, resp.UserBookmarkList.Bookmarks...)
+
+	// 處理分頁
+	for resp.UserBookmarkList.MoreBookmarksURL != "" {
+		resp, err = c.getBookmarksPage(resp.UserBookmarkList.MoreBookmarksURL)
+		if err != nil {
+			return allBookmarks, err
+		}
+		allBookmarks = append(allBookmarks, resp.UserBookmarkList.Bookmarks...)
+	}
+
+	return allBookmarks, nil
+}
+
+// Category 分類結構
+type Category struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
+// CategoriesResponse 分類列表回應
+type CategoriesResponse struct {
+	CategoryList struct {
+		Categories []Category `json:"categories"`
+	} `json:"category_list"`
+}
+
+// DeleteBookmark 刪除指定書籤
+func (c *Client) DeleteBookmark(bookmarkID int) error {
+	reqURL := fmt.Sprintf("%s/bookmarks/%d.json", c.baseURL, bookmarkID)
+	req, _ := http.NewRequest(http.MethodDelete, reqURL, nil)
+	req.Header = c.headers.Clone()
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-CSRF-Token", c.csrfToken)
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 403 {
+		return fmt.Errorf("被 Cloudflare 攔截 (403)")
+	}
+	if resp.StatusCode != 200 && resp.StatusCode != 204 {
+		return fmt.Errorf("刪除失敗，HTTP %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// DeleteAllBookmarks 刪除所有書籤
+func (c *Client) DeleteAllBookmarks() (int, error) {
+	bookmarks, err := c.GetAllBookmarks()
+	if err != nil {
+		return 0, err
+	}
+
+	deleted := 0
+	for _, bm := range bookmarks {
+		if err := c.DeleteBookmark(bm.ID); err != nil {
+			return deleted, fmt.Errorf("刪除書籤 %d 失敗: %v", bm.ID, err)
+		}
+		deleted++
+	}
+
+	return deleted, nil
+}
+
+// GetCategories 獲取所有分類
+func (c *Client) GetCategories() (map[int]string, error) {
+	req, _ := http.NewRequest(http.MethodGet, c.baseURL+"/categories.json", nil)
+	req.Header = c.headers.Clone()
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-CSRF-Token", c.csrfToken)
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 403 {
+		return nil, fmt.Errorf("被 Cloudflare 拦截 (403)")
+	}
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	var catResp CategoriesResponse
+	if err := json.Unmarshal(bodyBytes, &catResp); err != nil {
+		return nil, err
+	}
+
+	categories := make(map[int]string)
+	for _, cat := range catResp.CategoryList.Categories {
+		categories[cat.ID] = cat.Name
+	}
+
+	return categories, nil
+}
+
 // Search 搜索帖子
 func (c *Client) Search(query string, page int) (*SearchResponse, error) {
 	if page < 1 {
